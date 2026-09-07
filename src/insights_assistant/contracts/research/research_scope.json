@@ -1,0 +1,67 @@
+{
+  "contractVersion": "1.0",
+  "requestId": "2cf05929-4297-4d55-b48a-623e314eebd7",
+  "requestedBy": "banker-12345",
+  "externalResearch": {
+    "tools": [
+      {
+        "toolId": "edgar_mcp",
+        "enabled": true,
+        "parameters": {
+          "filingTypes": ["10-K", "10-Q", "8-K", "DEF 14A"],
+          "lookbackMonths": 24,
+          "includeExhibits": true
+        }
+      }
+    ]
+  },
+  "companyScope": {
+    "universe": "fortune_500",
+    "listYear": 2026,
+    "selectionMode": "explicit",
+    "companies": [
+      {
+        "name": "Walmart Inc.",
+        "ticker": "WMT",
+        "cik": "0000104169",
+        "fortuneRank": 1
+      },
+      {
+        "name": "Amazon.com, Inc.",
+        "ticker": "AMZN",
+        "cik": "0001018724",
+        "fortuneRank": 2
+      },
+      {
+        "name": "Apple Inc.",
+        "ticker": "AAPL",
+        "cik": "0000320193",
+        "fortuneRank": 3
+      }
+    ]
+  },
+  "internalResearch": {
+    "dataDomains": [
+      {"domainId": "client_profitability", "enabled": true},
+      {"domainId": "credit_exposure", "enabled": true},
+      {"domainId": "deposits_treasury_payments", "enabled": true},
+      {"domainId": "capital_markets_advisory", "enabled": true},
+      {"domainId": "product_whitespace", "enabled": true},
+      {"domainId": "relationship_interactions", "enabled": true}
+    ],
+    "generalSearchPrompt": "Identify material changes in strategy, capital allocation, liquidity, debt, acquisitions, geographic expansion, technology investment, restructuring, and disclosed risks. Connect external filing evidence to internal signals and recommend a concrete banker action.",
+    "asOfDate": "2026-08-13"
+  },
+  "insightRequirements": {
+    "totalCount": 10,
+    "categories": [
+      {"categoryId": "revenue_cross_sell", "minimumCount": 8},
+      {"categoryId": "credit_risk", "minimumCount": 5},
+      {"categoryId": "capital_markets_advisory", "minimumCount": 4},
+      {"categoryId": "treasury_payments_liquidity", "minimumCount": 3}
+    ],
+    "rankingCriteria": ["commercial_potential", "urgency", "confidence"],
+    "evidenceRequired": true,
+    "maxInsightsPerCompany": 10
+  }
+}

@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+
+# Per-request InsightPackage review snapshots (agents/package_store.py) --
+# generated locally while iterating on synthesis/review, not source.
+/insight_packages/
+
+# OS cruft
+.DS_Store
+
+# Editor/tool-local state -- not project source
+.codex/
+.codex-finalizer/

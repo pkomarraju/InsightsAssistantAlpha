@@ -1,0 +1,46 @@
+flowchart TD
+    U["User research request"] --> O["Orchestrator Agent<br/>Interpret scope and create workflow plan"]
+
+    O -->|"Source-specific task"| E["External Research Agent"]
+    O -->|"Source-specific task"| I["Internal Data Agent"]
+    O -->|"Source-specific task"| B["Banker Unstructured Data Agent"]
+
+    E --> ES["Public evidence<br/>Source, filing, section, date"]
+    I --> IS["Internal evidence<br/>Metric, period, record ID"]
+    B --> BS["RM-note evidence<br/>Note ID, date, supporting excerpt"]
+
+    ES --> C{"Required research complete?"}
+    IS --> C
+    BS --> C
+
+    C -->|"Yes or partial result allowed"| S["Insights Synthesis and Ranking Agent<br/>Combine, deduplicate, rank, link evidence"]
+    C -->|"Recoverable source failure"| R["Refined Research Prompt Skill<br/>Version prompt and narrow retry"]
+    R --> O
+
+    S --> Q["Evidence and Quality Review Agent<br/>Validate support, confidence, priority, completeness"]
+    Q --> D{"Review decision"}
+
+    D -->|"Pass"| P["Register Insights Skill<br/>Persist approved insight package"]
+    D -->|"Revise insight"| SR["Targeted synthesis feedback"]
+    SR --> S
+    D -->|"Missing or contradictory evidence"| RR["Targeted research feedback"]
+    RR --> R
+
+    P --> H["Human approval / banker decision"]
+    H --> M["Return final insights and run metadata"]
+
+    O -.-> T["Track task status, source failures,<br/>prompt versions, and retry count"]
+    R -.-> T
+    Q -.-> T
+
+    classDef agent fill:#E8F1FF,stroke:#2F6FED,stroke-width:1.5px,color:#172B4D
+    classDef evidence fill:#F3F4F6,stroke:#6B7280,color:#1F2937
+    classDef decision fill:#FFF4CC,stroke:#B7791F,stroke-width:1.5px,color:#5F370E
+    classDef control fill:#FDECEC,stroke:#C2413B,color:#6B1D1A
+    classDef outcome fill:#E8F7EE,stroke:#2F855A,stroke-width:1.5px,color:#174E32
+
+    class O,E,I,B,S,Q agent
+    class ES,IS,BS,T evidence
+    class C,D decision
+    class R,SR,RR control
+    class P,H,M outcome

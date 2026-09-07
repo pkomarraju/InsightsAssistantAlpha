@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/research-scope.schema.json",
+  "title": "Banker Research Scope Request",
+  "description": "Contract submitted by the UI to start a company research job.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "requestId",
+    "externalResearch",
+    "companyScope",
+    "internalResearch",
+    "insightRequirements"
+  ],
+  "properties": {
+    "contractVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Client-generated idempotency key. Reusing it must not create another job."
+    },
+    "requestedBy": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Optional authenticated-user identifier for audit correlation."
+    },
+    "externalResearch": {
+      "$ref": "#/$defs/externalResearch"
+    },
+    "companyScope": {
+      "$ref": "#/$defs/companyScope"
+    },
+    "internalResearch": {
+      "$ref": "#/$defs/internalResearch"
+    },
+    "insightRequirements": {
+      "$ref": "#/$defs/insightRequirements"
+    }
+  },
+  "$defs": {
+    "externalResearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools"],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolSelection"
+          }
+        }
+      }
+    },
+    "toolSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolId", "enabled"],
+      "properties": {
+        "toolId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{1,99}$",
+          "examples": ["edgar_mcp"]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Tool-specific options validated by the backend tool adapter.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "companyScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["universe", "selectionMode", "companies"],
+      "properties": {
+        "universe": {
+          "type": "string",
+          "enum": ["fortune_500"]
+        },
+        "listYear": {
+          "type": "integer",
+          "minimum": 1955,
+          "maximum": 2100,
+          "description": "Year of the Fortune 500 list used by the UI."
+        },
+        "selectionMode": {
+          "type": "string",
+          "enum": ["explicit", "top_n", "industry_filter"]
+        },
+        "companies": {
+          "type": "array",
+          "maxItems": 500,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/company"
+          }
+        },
+        "topN": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "industryFilters": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"selectionMode": {"const": "explicit"}}
+          },
+          "then": {
+            "properties": {"companies": {"minItems": 1}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"selectionMode": {"const": "top_n"}}
+          },
+          "then": {"required": ["topN"]}
+        },
+        {
+          "if": {
+            "properties": {"selectionMode": {"const": "industry_filter"}}
+          },
+          "then": {
+            "required": ["industryFilters"],
+            "properties": {"industryFilters": {"minItems": 1}}
+          }
+        }
+      ]
+    },
+    "company": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "ticker": {
+          "type": "string",
+          "pattern": "^[A-Z0-9.-]{1,10}$"
+        },
+        "cik": {
+          "type": "string",
+          "pattern": "^[0-9]{10}$",
+          "description": "Zero-padded SEC Central Index Key."
+        },
+        "fortuneRank": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        }
+      },
+      "anyOf": [
+        {"required": ["ticker"]},
+        {"required": ["cik"]}
+      ]
+    },
+    "internalResearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataDomains", "generalSearchPrompt"],
+      "properties": {
+        "dataDomains": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/dataDomain"
+          }
+        },
+        "generalSearchPrompt": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 8000
+        },
+        "asOfDate": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "dataDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domainId", "enabled"],
+      "properties": {
+        "domainId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{1,99}$",
+          "examples": ["credit_exposure"]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "filters": {
+          "type": "object",
+          "description": "Domain-specific, non-sensitive query filters.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "insightRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalCount", "categories", "rankingCriteria", "evidenceRequired"],
+      "properties": {
+        "totalCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightCategory"
+          }
+        },
+        "rankingCriteria": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["commercial_potential", "urgency", "confidence", "risk_severity"]
+          }
+        },
+        "evidenceRequired": {
+          "type": "boolean"
+        },
+        "maxInsightsPerCompany": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        }
+      }
+    },
+    "insightCategory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["categoryId", "minimumCount"],
+      "properties": {
+        "categoryId": {
+          "type": "string",
+          "enum": [
+            "revenue_cross_sell",
+            "credit_risk",
+            "capital_markets_advisory",
+            "treasury_payments_liquidity"
+          ]
+        },
+        "minimumCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  }
+}

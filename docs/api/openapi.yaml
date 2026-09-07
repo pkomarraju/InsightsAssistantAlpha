@@ -1,0 +1,1266 @@
+openapi: 3.1.0
+info:
+  title: Insights Assistant API
+  version: "1.0.0"
+  description: |
+    API contract for replacing the frontend's mock repository layer
+    (`frontend/src/api/mock/*`). This contract does not change agent
+    orchestration (`agents/orchestrator.py`) — `POST /v1/requests` persists a
+    research request and marks it `queued`; a future worker is responsible
+    for invoking the orchestrator and writing back `insights`, `companyProgress`,
+    and `sourceErrors` as it does.
+
+    Conventions:
+    - All JSON fields are camelCase.
+    - All entity identifiers (`companyId`, `requestId`, `insightId`, `evidenceCode`
+      references) are stable IDs, never display labels. `requestId` is a
+      client-generated UUID used as an idempotency key, per
+      `contracts/research/research_scope_schema.json`.
+    - List endpoints return a `{ items, page, pageSize, total }` envelope.
+    - Review actions (`approve` / `reject` / `reset`) use optimistic
+      concurrency via an `expectedVersion` field; mismatches return 409 with
+      the current resource attached so the client can reconcile.
+    - Auth is assumed (bearer token resolving to a banker identity) but not
+      specified here — see `docs/api/MIGRATION_PLAN.md`.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: /api
+
+tags:
+  - name: metadata
+    description: Selection options and reference data for filters and the request wizard.
+  - name: preferences
+    description: The current banker's insight preferences.
+  - name: requests
+    description: Guided insight research requests and their status.
+  - name: insights
+    description: Generated insights and the approve/reject review workflow.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/metadata:
+    get:
+      operationId: getMetadata
+      tags: [metadata]
+      summary: Available selection options for filters and the request wizard
+      description: |
+        Single source of truth for every enum/option list the frontend
+        currently hardcodes (`features/insights/filterOptions.ts`,
+        `features/requests/wizard/wizardState.ts`). Cacheable; the frontend
+        should treat this as slow-changing reference data, not per-request data.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metadata"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/preferences:
+    get:
+      operationId: getPreferences
+      tags: [preferences]
+      summary: Get the current banker's insight preferences
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreferences"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      operationId: updatePreferences
+      tags: [preferences]
+      summary: Partially update the current banker's insight preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePreferencesRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreferences"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/requests:
+    get:
+      operationId: listInsightRequests
+      tags: [requests]
+      summary: List insight research requests
+      parameters:
+        - $ref: "#/components/parameters/RequestStatusFilter"
+        - $ref: "#/components/parameters/CompanyIdFilter"
+        - $ref: "#/components/parameters/RequestedByFilter"
+        - $ref: "#/components/parameters/DateFromFilter"
+        - $ref: "#/components/parameters/DateToFilter"
+        - $ref: "#/components/parameters/RequestSortField"
+        - $ref: "#/components/parameters/SortDirection"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListInsightRequestsResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+    post:
+      operationId: createInsightRequest
+      tags: [requests]
+      summary: Create (or idempotently replay) a guided insight research request
+      description: |
+        `requestId` is a client-generated UUID idempotency key. If a request
+        with the same `requestId` already exists for the caller, the existing
+        resource is returned unchanged with `200 OK` and no new job is
+        queued. A genuinely new `requestId` returns `201 Created` and the
+        request is persisted with `status: queued`.
+
+        The server resolves `companyScope.companyIds` (stable company UUIDs)
+        into the `research_scope` contract's ticker/CIK-based company objects
+        and assembles a full `research_scope` payload
+        (`contracts/research/research_scope_schema.json`) — see
+        `docs/api/MAPPING.md` for the exact field-by-field transform. This
+        guarantees the persisted research scope matches what the guided
+        wizard selected; nothing is inferred or defaulted beyond what that
+        mapping documents.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInsightRequestBody"
+      responses:
+        "200":
+          description: Idempotent replay of an existing requestId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchRequestDetail"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchRequestDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "422":
+          description: Semantically invalid scope (e.g. minimumCount sums exceed totalCount)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/requests/{requestId}:
+    parameters:
+      - name: requestId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getInsightRequest
+      tags: [requests]
+      summary: Get request status, progress, source-level failures, and counts
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchRequestDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/requests/{requestId}/cancel:
+    parameters:
+      - name: requestId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: cancelInsightRequest
+      tags: [requests]
+      summary: Stop an in-flight request's research/synthesis/review generation
+      description: |
+        Stops the request's background work (research, synthesis, or review,
+        whichever is in flight) and sets status/currentStage to cancelled --
+        a distinct terminal state from failed. Any in-flight specialist,
+        Synthesizer, or Reviewer call is interrupted; nothing is persisted
+        for a cancelled request. Only valid from a non-terminal status
+        (draft/queued/running/partially_completed); a request already
+        completed/failed/cancelled returns 409.
+      responses:
+        "200":
+          description: OK -- cancellation applied (or the request had already reached this state)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchRequestDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The request has already reached a terminal state (completed, failed, or cancelled)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/insights:
+    get:
+      operationId: listInsights
+      tags: [insights]
+      summary: List insights with filtering, sorting, and pagination
+      parameters:
+        - $ref: "#/components/parameters/ReviewStatusFilter"
+        - $ref: "#/components/parameters/CategoryFilter"
+        - $ref: "#/components/parameters/CompanyIdFilter"
+        - $ref: "#/components/parameters/PersonaFilter"
+        - $ref: "#/components/parameters/PriorityFilter"
+        - $ref: "#/components/parameters/ConfidenceMinFilter"
+        - $ref: "#/components/parameters/ConfidenceMaxFilter"
+        - $ref: "#/components/parameters/DateFromFilter"
+        - $ref: "#/components/parameters/DateToFilter"
+        - $ref: "#/components/parameters/RequestIdFilter"
+        - $ref: "#/components/parameters/EvidenceSourceTypeFilter"
+        - $ref: "#/components/parameters/SearchFilter"
+        - $ref: "#/components/parameters/InsightSortField"
+        - $ref: "#/components/parameters/SortDirection"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListInsightsResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/insights/{insightId}:
+    parameters:
+      - name: insightId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getInsight
+      tags: [insights]
+      summary: Get full insight detail (evidence, review history)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Insight"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/insights/{insightId}/approve:
+    parameters:
+      - name: insightId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: approveInsight
+      tags: [insights]
+      summary: Approve an insight
+      description: "Valid only from `reviewStatus: pending`. Requires `expectedVersion` for optimistic concurrency."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveInsightRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Insight"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+
+  /v1/insights/{insightId}/reject:
+    parameters:
+      - name: insightId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: rejectInsight
+      tags: [insights]
+      summary: Reject an insight with a predefined reason
+      description: "Valid only from `reviewStatus: pending`. No free-form comment is accepted. Requires `expectedVersion`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectInsightRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Insight"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+
+  /v1/insights/{insightId}/reset:
+    parameters:
+      - name: insightId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: resetInsightReview
+      tags: [insights]
+      summary: Undo the most recent approve/reject decision, reverting to pending
+      description: |
+        Not one of the nine originally-specified contract groups, but added
+        because the shipped frontend's approve/reject flow includes an Undo
+        action (`useInsightReviewActions`, toast + persistent Undo button).
+        Dropping it would be a functional regression during migration — see
+        `docs/api/MIGRATION_PLAN.md`. Valid only from `approved` or `rejected`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetInsightReviewRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Insight"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    SortDirection:
+      name: sortDirection
+      in: query
+      schema:
+        $ref: "#/components/schemas/SortDirection"
+    InsightSortField:
+      name: sortField
+      in: query
+      schema:
+        $ref: "#/components/schemas/InsightSortField"
+    RequestSortField:
+      name: sortField
+      in: query
+      schema:
+        $ref: "#/components/schemas/RequestSortField"
+    ReviewStatusFilter:
+      name: reviewStatus
+      in: query
+      schema:
+        $ref: "#/components/schemas/ReviewStatus"
+    RequestStatusFilter:
+      name: status
+      in: query
+      schema:
+        $ref: "#/components/schemas/RequestStatus"
+    CategoryFilter:
+      name: category
+      in: query
+      schema:
+        $ref: "#/components/schemas/InsightCategory"
+    CompanyIdFilter:
+      name: companyId
+      in: query
+      schema: { type: string, format: uuid }
+    PersonaFilter:
+      name: persona
+      in: query
+      schema:
+        $ref: "#/components/schemas/InsightPersona"
+    PriorityFilter:
+      name: priority
+      in: query
+      schema:
+        $ref: "#/components/schemas/InsightPriority"
+    ConfidenceMinFilter:
+      name: confidenceMin
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 100 }
+    ConfidenceMaxFilter:
+      name: confidenceMax
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 100 }
+    DateFromFilter:
+      name: dateFrom
+      in: query
+      description: Inclusive lower bound on generatedAt (insights) or createdAt (requests), YYYY-MM-DD.
+      schema: { type: string, format: date }
+    DateToFilter:
+      name: dateTo
+      in: query
+      description: Inclusive upper bound, YYYY-MM-DD.
+      schema: { type: string, format: date }
+    RequestIdFilter:
+      name: requestId
+      in: query
+      schema: { type: string, format: uuid }
+    RequestedByFilter:
+      name: requestedBy
+      in: query
+      schema: { type: string }
+    EvidenceSourceTypeFilter:
+      name: evidenceSourceType
+      in: query
+      schema:
+        $ref: "#/components/schemas/EvidenceSourceType"
+    SearchFilter:
+      name: search
+      in: query
+      description: Free-text match against title, finding, and company name.
+      schema: { type: string, maxLength: 200 }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request failed schema validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    VersionConflict:
+      description: expectedVersion did not match the resource's current version, or the action is not valid from the resource's current reviewStatus
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VersionConflictResponse"
+
+  schemas:
+    # --- Enums ---------------------------------------------------------
+    RelationshipTier:
+      type: string
+      enum: [tier_1, tier_2]
+    InsightCategory:
+      type: string
+      description: >-
+        Business area the insight was requested under. financing_liquidity, deal_fee_opportunity,
+        financial_performance, and risk_coverage_attention are the categories the new-request wizard
+        currently offers; the other five are legacy (no longer selectable there) but remain valid for
+        reading/displaying an existing stored insight. relationship_risk is distinct from credit_risk:
+        a worsening relationship-risk score, lost mandates, or competitor activity are relationship_risk,
+        never credit_risk, unless direct borrower credit-quality evidence (a rating downgrade, covenant
+        pressure, delinquency, etc.) is also cited.
+      enum:
+        - revenue_cross_sell
+        - credit_risk
+        - capital_markets_advisory
+        - treasury_payments_liquidity
+        - relationship_risk
+        - financing_liquidity
+        - deal_fee_opportunity
+        - financial_performance
+        - risk_coverage_attention
+    InsightSubtype:
+      type: string
+      description: The risk/opportunity driver, orthogonal to category. See rag/risk_classifier.py for the relationship_risk vs. project_risk distinction this models.
+      enum:
+        - relationship_risk
+        - opportunity_risk
+        - project_risk
+        - credit_risk
+        - operational_risk
+        - financing_liquidity
+        - deal_fee_opportunity
+        - financial_performance
+        - risk_coverage_attention
+    RiskType:
+      type: string
+      description: Which risk domain a piece of evidence or a synthesized claim concerns.
+      enum: [relationship_risk, credit_risk, concentration_risk, operational_risk]
+    ClaimType:
+      type: string
+      description: >-
+        The semantic claim family a synthesized insight makes, and/or that one piece of evidence is
+        capable of supporting. A credit_risk insight requires primary_claim=credit_quality_deteriorating
+        backed by direct credit-quality evidence -- a worsening relationship-risk score alone never
+        qualifies. financing_liquidity_signal, deal_fee_opportunity, financial_performance_signal, and
+        risk_coverage_attention back the four current wizard categories and are each gated on their own
+        required evidence the same way.
+      enum:
+        - relationship_risk_worsening
+        - credit_quality_deteriorating
+        - competitor_share_loss
+        - revenue_decline
+        - product_or_cross_sell_opportunity
+        - no_material_impact
+        - financing_liquidity_signal
+        - deal_fee_opportunity
+        - financial_performance_signal
+        - risk_coverage_attention
+    MonetaryMetricType:
+      type: string
+      description: What kind of dollar figure a cited evidence item's amount represents.
+      enum: [credit_exposure, estimated_loss, business_impact, revenue, opportunity_value]
+    InsightPriority:
+      type: string
+      enum: [critical, high, medium, low]
+    InsightPersona:
+      type: string
+      enum: [relationship_manager, credit_officer, capital_markets_banker, treasury_sales_officer, risk_officer, executive_sponsor]
+    ReviewStatus:
+      type: string
+      enum: [pending, approved, rejected]
+    RejectReason:
+      type: string
+      enum: [incorrect, insufficient_evidence, duplicate, not_material, outdated, wrong_audience, action_not_useful]
+    EvidenceSourceAgent:
+      type: string
+      enum: [external_data_agent, internal_data_agent, relationship_notes_agent]
+    EvidenceSourceType:
+      type: string
+      enum: [internal, external]
+    RequestStatus:
+      type: string
+      description: >-
+        partially_completed distinguishes "some companies/sources finished, some failed" from a clean
+        completed/failed terminal state. cancelled is a distinct terminal state from failed: the request
+        was deliberately stopped (POST /v1/requests/{requestId}/cancel), not a run that hit an error.
+      enum: [draft, queued, running, partially_completed, completed, failed, cancelled]
+    RequestStage:
+      type: string
+      description: |
+        The two-agent workflow's (Insights Synthesizer + Evidence and Quality
+        Review Agent, see docs/INSIGHTS_ASSISTANT_MULTI_AGENT_DESIGN.md)
+        coarse, frontend-facing stage vocabulary -- finer-grained than
+        `status` but not a replacement for it. `status` remains the small
+        field every stage maps onto (queued/running for every non-terminal
+        stage, completed/failed for the terminal ones).
+
+        waiting_for_sources and reviewing each fold two internal
+        WorkflowStage values together (contracts/workflow/enums.py's
+        RESEARCHING/AWAITING_SYNTHESIS and AWAITING_REVIEW/REVIEWING) because
+        the folded-in stage is a momentary handoff a poller could never
+        actually observe with today's synchronous request/synthesize/review
+        pipeline -- not a gap in the contract.
+      enum:
+        - queued
+        - researching
+        - waiting_for_sources
+        - synthesizing
+        - reviewing
+        - revising_synthesis
+        - revising_research
+        - completed
+        - failed
+        - cancelled
+    ReviewDecisionType:
+      type: string
+      description: The Evidence and Quality Review Agent's decision on one InsightPackage.
+      enum: [pass, revise_insights, revise_research, fail]
+    SourceAgentStatus:
+      type: string
+      enum: [pending, running, completed, failed]
+    CompanySelectionMode:
+      type: string
+      enum: [explicit, top_n, industry_filter]
+    RankingCriterion:
+      type: string
+      enum: [commercial_potential, urgency, confidence, risk_severity]
+    InsightSortField:
+      type: string
+      enum: [generatedAt, priority, confidence, businessImpact]
+    RequestSortField:
+      type: string
+      enum: [createdAt, updatedAt]
+    SortDirection:
+      type: string
+      enum: [asc, desc]
+    DisplayDensity:
+      type: string
+      enum: [comfortable, compact]
+
+    # --- Shared building blocks -----------------------------------------
+    IdLabel:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: string }
+        label: { type: string }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [NOT_FOUND, VALIDATION_ERROR, VERSION_CONFLICT, INVALID_STATE_TRANSITION, SEMANTIC_ERROR]
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+
+    VersionConflictResponse:
+      type: object
+      required: [error, current]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorResponse/properties/error"
+        current:
+          description: The resource's current server-side state, for client reconciliation.
+          $ref: "#/components/schemas/Insight"
+
+    # --- Metadata ---------------------------------------------------------
+    CompanyOption:
+      type: object
+      required: [companyId, companyCode, companyName, ticker, industry, sector, relationshipTier, fortuneRank]
+      properties:
+        companyId: { type: string, format: uuid, description: "Stable primary key (company_master.company_id)." }
+        companyCode: { type: string, pattern: "^CLI_[0-9]{3,}$", description: "Stable business key (company_master.company_code)." }
+        companyName: { type: string, description: "Display label — never used as a filter/reference value." }
+        ticker: { type: string }
+        cik: { type: ["string", "null"], pattern: "^[0-9]{10}$" }
+        industry: { type: string }
+        sector: { type: string }
+        relationshipTier:
+          $ref: "#/components/schemas/RelationshipTier"
+        fortuneRank: { type: ["integer", "null"], minimum: 1, maximum: 500 }
+
+    DataDomainOption:
+      type: object
+      required: [id, label, description]
+      properties:
+        id: { type: string, pattern: "^[a-z][a-z0-9._-]{1,99}$" }
+        label: { type: string }
+        description: { type: string }
+
+    ConfidenceTierOption:
+      type: object
+      required: [id, label, min, max]
+      properties:
+        id: { type: string, enum: [high, medium, low] }
+        label: { type: string }
+        min: { type: integer, minimum: 0, maximum: 100 }
+        max: { type: integer, minimum: 0, maximum: 100 }
+
+    Metadata:
+      type: object
+      required:
+        - companies
+        - categories
+        - subtypes
+        - priorities
+        - personas
+        - reviewStatuses
+        - rejectReasons
+        - evidenceSourceTypes
+        - dataDomains
+        - filingTypes
+        - rankingCriteria
+        - confidenceTiers
+        - generatedAt
+      properties:
+        companies:
+          type: array
+          items: { $ref: "#/components/schemas/CompanyOption" }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        subtypes:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        priorities:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        personas:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        reviewStatuses:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        rejectReasons:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        evidenceSourceTypes:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        dataDomains:
+          type: array
+          items: { $ref: "#/components/schemas/DataDomainOption" }
+        filingTypes:
+          type: array
+          items: { type: string, enum: ["10-K", "10-Q", "8-K", "DEF 14A"] }
+        rankingCriteria:
+          type: array
+          items: { $ref: "#/components/schemas/IdLabel" }
+        confidenceTiers:
+          type: array
+          items: { $ref: "#/components/schemas/ConfidenceTierOption" }
+        generatedAt: { type: string, format: date-time }
+
+    # --- Preferences --------------------------------------------------
+    UserPreferences:
+      type: object
+      required:
+        - displayName
+        - role
+        - defaultDataDomains
+        - defaultRankingCriteria
+        - emailDigestEnabled
+        - atRiskAlertsEnabled
+        - displayDensity
+        - defaultLookbackMonths
+      properties:
+        displayName: { type: string }
+        role: { type: string }
+        defaultDataDomains:
+          type: array
+          items: { type: string, description: "References Metadata.dataDomains[].id" }
+        defaultRankingCriteria:
+          type: array
+          items: { $ref: "#/components/schemas/RankingCriterion" }
+        emailDigestEnabled: { type: boolean }
+        atRiskAlertsEnabled: { type: boolean }
+        displayDensity:
+          $ref: "#/components/schemas/DisplayDensity"
+        defaultLookbackMonths: { type: integer, minimum: 1, maximum: 60 }
+
+    UpdatePreferencesRequest:
+      type: object
+      description: All fields optional; only provided fields are updated (PATCH semantics).
+      properties:
+        displayName: { type: string }
+        role: { type: string }
+        defaultDataDomains:
+          type: array
+          items: { type: string }
+        defaultRankingCriteria:
+          type: array
+          items: { $ref: "#/components/schemas/RankingCriterion" }
+        emailDigestEnabled: { type: boolean }
+        atRiskAlertsEnabled: { type: boolean }
+        displayDensity:
+          $ref: "#/components/schemas/DisplayDensity"
+        defaultLookbackMonths: { type: integer, minimum: 1, maximum: 60 }
+
+    # --- Evidence & review history --------------------------------------
+    EvidenceItem:
+      type: object
+      required: [id, sourceAgent, sourceType, evidenceCode, label, detail, date]
+      properties:
+        id: { type: string, format: uuid }
+        sourceAgent:
+          $ref: "#/components/schemas/EvidenceSourceAgent"
+        sourceType:
+          $ref: "#/components/schemas/EvidenceSourceType"
+        evidenceCode:
+          type: string
+          description: "Stable citation id from the source system, e.g. RISK_016, RMN_007, OPP_004. Preserved verbatim, never regenerated."
+        label: { type: string }
+        detail: { type: string }
+        date: { type: string, format: date }
+        riskTypes:
+          type: array
+          default: []
+          description: Which risk domain(s) this evidence item's own content concerns, deterministically classified from its label/detail text.
+          items: { $ref: "#/components/schemas/RiskType" }
+        supportedClaims:
+          type: array
+          default: []
+          description: Which claim families this evidence item's own content directly supports.
+          items: { $ref: "#/components/schemas/ClaimType" }
+        metricType:
+          allOf: [{ $ref: "#/components/schemas/MonetaryMetricType" }]
+          nullable: true
+          description: What kind of dollar figure this item documents, if any. Never implies the amount is itself at risk of being lost.
+
+    ReviewEvent:
+      type: object
+      required: [id, action, actorId, actorDisplayName, timestamp]
+      properties:
+        id: { type: string, format: uuid }
+        action:
+          type: string
+          enum: [generated, approved, rejected, reset]
+        actorId:
+          type: string
+          description: "Stable banker identifier (matches ResearchRequest.requestedBy), e.g. banker-12345. system for the initial generated event."
+        actorDisplayName:
+          type: string
+          description: Denormalized display label — never used as a filter/reference value.
+        timestamp: { type: string, format: date-time }
+        reason:
+          $ref: "#/components/schemas/RejectReason"
+
+    BusinessImpact:
+      type: object
+      description: >-
+        The monetary picture for one insight, split by what it actually means. exposureUsd is a raw
+        balance cited evidence establishes (e.g. credit exposure) -- never itself a claim that the
+        amount is at risk. estimatedImpactUsd is the Synthesizer's own estimate of business impact and
+        is present only when impactBasis documents how it was derived; it is never a bare copy of
+        exposureUsd. Both are optional/nullable and independent of each other.
+      required: [description]
+      properties:
+        exposureUsd:
+          type: integer
+          minimum: 0
+          nullable: true
+        estimatedImpactUsd:
+          type: integer
+          minimum: 0
+          nullable: true
+        impactBasis:
+          type: string
+          nullable: true
+          description: How estimatedImpactUsd was derived from cited evidence. Present whenever estimatedImpactUsd is set.
+        description: { type: string }
+
+    # --- Insights -----------------------------------------------------
+    InsightSummary:
+      type: object
+      description: Lightweight row shape for list responses — omits evidence[] and reviewHistory[] to keep list payloads small; fetch GET /v1/insights/{id} for the full record.
+      required:
+        - id
+        - version
+        - requestId
+        - companyId
+        - companyCode
+        - companyName
+        - category
+        - subtype
+        - persona
+        - title
+        - priority
+        - confidence
+        - businessImpact
+        - generatedAt
+        - reviewStatus
+        - evidenceCount
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        requestId: { type: string, format: uuid }
+        companyId: { type: string, format: uuid }
+        companyCode: { type: string }
+        companyName: { type: string }
+        category:
+          $ref: "#/components/schemas/InsightCategory"
+        subtype:
+          $ref: "#/components/schemas/InsightSubtype"
+        persona:
+          $ref: "#/components/schemas/InsightPersona"
+        title: { type: string }
+        priority:
+          $ref: "#/components/schemas/InsightPriority"
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        businessImpact:
+          $ref: "#/components/schemas/BusinessImpact"
+        generatedAt: { type: string, format: date-time }
+        reviewStatus:
+          $ref: "#/components/schemas/ReviewStatus"
+        evidenceCount: { type: integer, minimum: 0 }
+
+    Insight:
+      allOf:
+        - $ref: "#/components/schemas/InsightSummary"
+        - type: object
+          required: [finding, whyItMatters, recommendedAction, confidenceRationale, reviewHistory, evidence]
+          properties:
+            primaryClaim:
+              allOf: [{ $ref: "#/components/schemas/ClaimType" }]
+              description: >-
+                The semantic claim family this insight makes, deterministically validated against its
+                cited evidence before persistence -- e.g. relationship_risk_worsening vs.
+                credit_quality_deteriorating, never conflated.
+            finding: { type: string }
+            whyItMatters: { type: string }
+            recommendedAction: { type: string }
+            confidenceRationale: { type: string }
+            reviewHistory:
+              type: array
+              items: { $ref: "#/components/schemas/ReviewEvent" }
+            evidence:
+              type: array
+              items: { $ref: "#/components/schemas/EvidenceItem" }
+
+    InsightCounts:
+      type: object
+      required: [generated, approved, rejected, pending]
+      properties:
+        generated: { type: integer, minimum: 0, description: "Total insights matching the current filters (== total)." }
+        approved: { type: integer, minimum: 0 }
+        rejected: { type: integer, minimum: 0 }
+        pending: { type: integer, minimum: 0 }
+
+    ListInsightsResponse:
+      type: object
+      required: [items, page, pageSize, total, counts]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/InsightSummary" }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1 }
+        total: { type: integer, minimum: 0 }
+        counts:
+          allOf:
+            - $ref: "#/components/schemas/InsightCounts"
+          description: Counts reflect the current filter set, not the global table.
+
+    ApproveInsightRequest:
+      type: object
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer, minimum: 1 }
+
+    RejectInsightRequest:
+      type: object
+      required: [expectedVersion, reason]
+      properties:
+        expectedVersion: { type: integer, minimum: 1 }
+        reason:
+          $ref: "#/components/schemas/RejectReason"
+
+    ResetInsightReviewRequest:
+      type: object
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer, minimum: 1 }
+
+    # --- Research requests ------------------------------------------------
+    CompanyScopeSelection:
+      type: object
+      description: Mirrors contracts/research/research_scope_schema.json#companyScope, addressed by stable companyId rather than name/ticker.
+      required: [universe, selectionMode]
+      properties:
+        universe: { type: string, const: fortune_500 }
+        listYear: { type: integer, minimum: 1955, maximum: 2100 }
+        selectionMode:
+          $ref: "#/components/schemas/CompanySelectionMode"
+        companyIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Required when selectionMode = explicit.
+        topN: { type: integer, minimum: 1, maximum: 500, description: Required when selectionMode = top_n. }
+        industryFilters:
+          type: array
+          items: { type: string }
+          description: Required when selectionMode = industry_filter.
+
+    ExternalResearchSelection:
+      type: object
+      required: [edgarEnabled, filingTypes, lookbackMonths]
+      properties:
+        edgarEnabled: { type: boolean }
+        filingTypes:
+          type: array
+          items: { type: string, enum: ["10-K", "10-Q", "8-K", "DEF 14A"] }
+        lookbackMonths: { type: integer, minimum: 1, maximum: 60 }
+
+    InternalResearchSelection:
+      type: object
+      required: [dataDomainIds, generalSearchPrompt]
+      properties:
+        dataDomainIds:
+          type: array
+          items: { type: string }
+          minItems: 1
+        generalSearchPrompt: { type: string, minLength: 20, maxLength: 8000 }
+        asOfDate: { type: string, format: date }
+
+    RequestInsightCategory:
+      type: object
+      required: [categoryId, minimumCount]
+      properties:
+        categoryId:
+          $ref: "#/components/schemas/InsightCategory"
+        minimumCount: { type: integer, minimum: 0, maximum: 100 }
+
+    InsightRequirementsSelection:
+      type: object
+      required: [totalCount, categories, rankingCriteria]
+      properties:
+        totalCount: { type: integer, minimum: 1, maximum: 100 }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/RequestInsightCategory" }
+          minItems: 1
+        rankingCriteria:
+          type: array
+          items: { $ref: "#/components/schemas/RankingCriterion" }
+          minItems: 1
+        maxInsightsPerCompany: { type: integer, minimum: 1, maximum: 20 }
+
+    CreateInsightRequestBody:
+      type: object
+      required: [requestId, companyScope, externalResearch, internalResearch, insightRequirements]
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Client-generated idempotency key. Reusing it replays the existing request rather than creating another job.
+        companyScope:
+          $ref: "#/components/schemas/CompanyScopeSelection"
+        externalResearch:
+          $ref: "#/components/schemas/ExternalResearchSelection"
+        internalResearch:
+          $ref: "#/components/schemas/InternalResearchSelection"
+        insightRequirements:
+          $ref: "#/components/schemas/InsightRequirementsSelection"
+
+    SourceError:
+      type: object
+      required: [id, source, code, message, occurredAt, retryable]
+      properties:
+        id: { type: string, format: uuid }
+        source:
+          $ref: "#/components/schemas/EvidenceSourceAgent"
+        companyId: { type: ["string", "null"], format: uuid, description: Null if the failure is request-level rather than company-specific. }
+        code: { type: string, description: "Machine-readable failure code, e.g. timeout, rate_limited, no_data, auth_error." }
+        message: { type: string }
+        occurredAt: { type: string, format: date-time }
+        retryable: { type: boolean }
+
+    CompanyProgress:
+      type: object
+      required: [companyId, companyName, status, insightsGenerated]
+      properties:
+        companyId: { type: string, format: uuid }
+        companyName: { type: string }
+        status:
+          $ref: "#/components/schemas/SourceAgentStatus"
+        insightsGenerated: { type: integer, minimum: 0 }
+
+    AuditEvent:
+      type: object
+      description: |
+        One entry of the compact workflow version history: a stage
+        transition or a Reviewer decision, in the order they happened.
+        `detail` (when present) carries only the Reviewer's own
+        designed-to-be-shown output -- decision type, its own concise
+        audit-text comments, affected insight/source ids -- never hidden
+        model reasoning, since nothing upstream of this API ever produces
+        that (see agents/reviewer.py).
+      required: [stage, message, occurredAt]
+      properties:
+        stage: { type: string, description: "The internal WorkflowStage value at this event (contracts/workflow/enums.py), not the coarser RequestStage." }
+        message: { type: string }
+        occurredAt: { type: string, format: date-time }
+        detail:
+          type: object
+          nullable: true
+          properties:
+            decision:
+              $ref: "#/components/schemas/ReviewDecisionType"
+            comments: { type: string }
+            affectedInsightIds:
+              type: array
+              items: { type: string }
+            affectedSourceAgents:
+              type: array
+              items: { $ref: "#/components/schemas/EvidenceSourceAgent" }
+
+    UnmetRequirement:
+      type: object
+      description: A requested insight count or category the Synthesizer could not satisfy from the available evidence -- reported explicitly rather than an insight being manufactured to hit a number.
+      required: [requestedCount, actualCount, reason]
+      properties:
+        category:
+          allOf:
+            - $ref: "#/components/schemas/InsightCategory"
+          nullable: true
+          description: Null for an unmet totalCount requirement not tied to one category.
+        requestedCount: { type: integer, minimum: 0 }
+        actualCount: { type: integer, minimum: 0 }
+        reason: { type: string }
+
+    RequestCounts:
+      type: object
+      required: [generated, approved, rejected, pending]
+      properties:
+        generated: { type: integer, minimum: 0 }
+        approved: { type: integer, minimum: 0 }
+        rejected: { type: integer, minimum: 0 }
+        pending: { type: integer, minimum: 0 }
+
+    ResearchRequestSummary:
+      type: object
+      required:
+        - requestId
+        - requestedBy
+        - status
+        - currentStage
+        - createdAt
+        - updatedAt
+        - companyIds
+        - companyNames
+        - progressPct
+        - counts
+        - requestVersion
+        - packageVersion
+        - researchRevisionCount
+        - synthesisRevisionCount
+      properties:
+        requestId: { type: string, format: uuid }
+        requestedBy: { type: string, description: "Stable banker identifier, e.g. banker-12345." }
+        status:
+          $ref: "#/components/schemas/RequestStatus"
+        currentStage:
+          $ref: "#/components/schemas/RequestStage"
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        companyIds:
+          type: array
+          items: { type: string, format: uuid }
+        companyNames:
+          type: array
+          items: { type: string }
+          description: Denormalized for list-view display — never used as a filter/reference value.
+        progressPct: { type: integer, minimum: 0, maximum: 100, description: "Indicative position in the coarse pipeline, not a measured percentage of work done -- see RequestStage." }
+        counts:
+          $ref: "#/components/schemas/RequestCounts"
+        requestVersion: { type: integer, minimum: 1, description: "Increments only when a research revision is accepted (contracts/workflow/state.py)." }
+        packageVersion: { type: integer, minimum: 1, description: "Increments only when a synthesis revision is accepted." }
+        researchRevisionCount: { type: integer, minimum: 0, maximum: 1, description: "Whether the (at most one) research-revision budget has been used." }
+        synthesisRevisionCount: { type: integer, minimum: 0, maximum: 1, description: "Whether the (at most one) synthesis-revision budget has been used." }
+
+    ResearchRequestDetail:
+      allOf:
+        - $ref: "#/components/schemas/ResearchRequestSummary"
+        - type: object
+          required:
+            - companyScope
+            - externalResearch
+            - internalResearch
+            - insightRequirements
+            - resultInsightIds
+            - companyProgress
+            - sourceErrors
+            - errorMessage
+            - reviewDecision
+            - reviewComments
+            - auditEvents
+            - unmetRequirements
+          properties:
+            companyScope:
+              allOf:
+                - $ref: "#/components/schemas/CompanyScopeSelection"
+                - type: object
+                  properties:
+                    companies:
+                      type: array
+                      items: { $ref: "#/components/schemas/CompanyOption" }
+            externalResearch:
+              $ref: "#/components/schemas/ExternalResearchSelection"
+            internalResearch:
+              $ref: "#/components/schemas/InternalResearchSelection"
+            insightRequirements:
+              $ref: "#/components/schemas/InsightRequirementsSelection"
+            resultInsightIds:
+              type: array
+              items: { type: string, format: uuid }
+            companyProgress:
+              type: array
+              items: { $ref: "#/components/schemas/CompanyProgress" }
+            sourceErrors:
+              type: array
+              items: { $ref: "#/components/schemas/SourceError" }
+            errorMessage:
+              type: ["string", "null"]
+              description: Top-level summary error retained for the current UI; sourceErrors is the structured replacement.
+            reviewDecision:
+              allOf:
+                - $ref: "#/components/schemas/ReviewDecisionType"
+              nullable: true
+              description: The last decision the Evidence and Quality Review Agent made, if research ever reached synthesis+review. Null before that point.
+            reviewComments:
+              type: ["string", "null"]
+              description: The Reviewer's own concise, decision-oriented audit text for reviewDecision -- never hidden model reasoning.
+            auditEvents:
+              type: array
+              items: { $ref: "#/components/schemas/AuditEvent" }
+              description: Compact version history -- every stage transition and every review decision, in order.
+            unmetRequirements:
+              type: array
+              items: { $ref: "#/components/schemas/UnmetRequirement" }
+              description: Only ever non-empty on a request whose InsightPackage passed review; empty (not omitted) otherwise.
+
+    ListInsightRequestsResponse:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ResearchRequestSummary" }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1 }
+        total: { type: integer, minimum: 0 }
